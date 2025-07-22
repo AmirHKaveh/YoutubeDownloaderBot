@@ -1,5 +1,9 @@
-﻿using System.Diagnostics;
+﻿using HtmlAgilityPack;
+
+using System.Diagnostics;
+using System.Net.Http;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 
 using Telegram.Bot;
@@ -13,6 +17,7 @@ using YoutubeExplode;
 using YoutubeExplode.Videos.Streams;
 
 var botClient = new TelegramBotClient("8054511567:AAGo05bzhI1iGfyLbRt8VncK6S5ToSrK96k");
+HttpClient _httpClient = new HttpClient();
 
 using CancellationTokenSource cts = new();
 
@@ -57,7 +62,10 @@ async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, Cancel
         {
             await YoutubeDownloader(message, chatId, cancellationToken);
         }
-
+        else if (messageText.Contains("instagram.com/reel/") || messageText.Contains("instagram.com/p/"))
+        {
+            await InstagramDownloader(message, chatId, cancellationToken);
+        }
     }
     else if (update.Type == UpdateType.CallbackQuery)
     {
@@ -67,8 +75,8 @@ async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, Cancel
         await HandleCallbackQuery(botClient, callbackQuery, cancellationToken);
     }
 
-}
 
+}
 Task HandlePollingErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken cancellationToken)
 {
     var ErrorMessage = exception switch
@@ -316,6 +324,7 @@ async Task DownloadWithProgress(
         await stream.CopyToAsync(fileStream);
     }
 }
+
 async Task SetButtons(ITelegramBotClient botClient, Message message)
 {
 
@@ -344,9 +353,7 @@ async Task HandleCallbackQuery(ITelegramBotClient botClient, CallbackQuery callb
     }
     else if (callbackQuery.Data == "instagram_btn")
     {
-        await botClient.SendMessage(
-            chatId: callbackQuery.Message.Chat.Id,
-            text: "You clicked Button 2");
+        await InstagramCallback(callbackQuery.Message.Chat.Id, cancellationToken);
     }
 
     // Always answer callback queries to remove the loading state
@@ -360,6 +367,15 @@ async Task YoutubeCallback(long chatId, CancellationToken cancellationToken)
         chatId: chatId,
         text: "Please send me a YouTube URL to download the video.",
         cancellationToken: cancellationToken);
+}
+
+async Task InstagramCallback(long chatId, CancellationToken cancellationToken)
+{
+    await botClient.SendMessage(
+        chatId: chatId,
+        text: "I received an Instagram URL! Attempting to process...",
+        cancellationToken: cancellationToken
+    );
 }
 
 async Task YoutubeDownloader(Message message, long chatId, CancellationToken cancellationToken)
@@ -420,6 +436,139 @@ async Task YoutubeDownloader(Message message, long chatId, CancellationToken can
             chatId: chatId,
             text: $"Error: {ex.Message}",
             cancellationToken: cancellationToken);
+
+        await SetButtons(botClient, message);
+
     }
 }
+
+async Task InstagramDownloader(Message message, long chatId, CancellationToken cancellationToken)
+{
+    try
+    {
+        await botClient.SendMessage(
+                    chatId: chatId,
+                    text: "Processing Instagram link...",
+                    cancellationToken: cancellationToken);
+
+        var videoUrl = await GetInstagramVideoUrl(message.Text);
+
+        if (videoUrl != null)
+        {
+            // Download the video
+            var videoBytes = await _httpClient.GetByteArrayAsync(videoUrl);
+            var fileName = $"instagram_video_{DateTime.Now:yyyyMMddHHmmss}.mp4";
+
+            // Send the video back to the user
+            await using (var stream = new MemoryStream(videoBytes))
+            {
+                await botClient.SendVideo(
+                    chatId: chatId,
+                    video: InputFile.FromStream(stream, fileName),
+                    caption: "Here's your Instagram video",
+                    cancellationToken: cancellationToken);
+            }
+        }
+        else
+        {
+            await botClient.SendMessage(
+                chatId: chatId,
+                text: "Failed to download the Instagram video.",
+                cancellationToken: cancellationToken);
+        }
+
+        await SetButtons(botClient, message);
+    }
+    catch (Exception ex)
+    {
+        await botClient.SendMessage(
+                   chatId: chatId,
+                   text: $"Error: {ex.Message}",
+                   cancellationToken: cancellationToken);
+
+        await SetButtons(botClient, message);
+    }
+}
+
+
+
+async Task<string> GetInstagramVideoUrl(string instagramUrl)
+{
+    try
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "yt-dlp", // or "python" and then add arguments for yt-dlp.py
+            Arguments = $"--dump-json \"{instagramUrl}\"", // Dumps metadata as JSON
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using (var process = Process.Start(psi))
+        {
+            if (process == null)
+            {
+                Console.WriteLine("Error: yt-dlp process could not be started.");
+                return null;
+            }
+
+            var output = await process.StandardOutput.ReadToEndAsync();
+            var error = await process.StandardError.ReadToEndAsync();
+
+            await process.WaitForExitAsync();
+
+            if (process.ExitCode == 0)
+            {
+                // yt-dlp dumps a lot of info, we need to parse the JSON output
+                // Look for the 'url' or 'webpage_url' in the JSON, or better, 'url' from 'formats'
+                // This parsing might need to be more robust depending on the exact JSON structure.
+
+                using (JsonDocument doc = JsonDocument.Parse(output))
+                {
+                    JsonElement root = doc.RootElement;
+                    if (root.TryGetProperty("url", out JsonElement videoUrlElement) && videoUrlElement.ValueKind == JsonValueKind.String)
+                    {
+                        // This might be the direct URL for a single video post
+                        return videoUrlElement.GetString();
+                    }
+                    else if (root.TryGetProperty("entries", out JsonElement entriesElement) && entriesElement.ValueKind == JsonValueKind.Array)
+                    {
+                        // For carousels, it might be in 'entries'
+                        if (entriesElement.EnumerateArray().FirstOrDefault().TryGetProperty("url", out videoUrlElement) && videoUrlElement.ValueKind == JsonValueKind.String)
+                        {
+                            return videoUrlElement.GetString();
+                        }
+                    }
+                    // Fallback for cases where 'url' isn't directly at the root or first entry,
+                    // and we need to find the best format.
+                    if (root.TryGetProperty("formats", out JsonElement formatsElement) && formatsElement.ValueKind == JsonValueKind.Array)
+                    {
+                        // Find the best quality video format
+                        foreach (JsonElement format in formatsElement.EnumerateArray())
+                        {
+                            if (format.TryGetProperty("url", out JsonElement formatUrlElement) && formatUrlElement.ValueKind == JsonValueKind.String &&
+                                format.TryGetProperty("vcodec", out JsonElement vcodecElement) && vcodecElement.ValueKind == JsonValueKind.String && vcodecElement.GetString() != "none")
+                            {
+                                // Prioritize video formats, you might want to add more logic for best quality
+                                return formatUrlElement.GetString();
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                Console.WriteLine($"yt-dlp Error (Exit Code {process.ExitCode}): {error}");
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error running yt-dlp: {ex.Message}");
+    }
+    return null;
+}
+
 

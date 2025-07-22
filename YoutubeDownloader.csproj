@@ -9,8 +9,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="HtmlAgilityPack" Version="1.12.2" />
     <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="9.0.7" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.7" />
+    <PackageReference Include="Selenium.WebDriver" Version="4.34.0" />
     <PackageReference Include="Telegram.bot" Version="22.6.0" />
     <PackageReference Include="YoutubeExplode" Version="6.5.4" />
   </ItemGroup>
