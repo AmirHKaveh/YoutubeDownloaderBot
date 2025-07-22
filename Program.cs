@@ -1,30 +1,18 @@
-﻿using Microsoft.Extensions.Configuration;
-
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text;
+using System.Threading;
 
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
+using Telegram.Bot.Types.ReplyMarkups;
 
 using YoutubeExplode;
 using YoutubeExplode.Videos.Streams;
 
-var builder = new ConfigurationBuilder()
-    .AddUserSecrets<Program>();
-var configuration = builder.Build();
-
-string apiKey = configuration["ApiKeys:MyApiKey"];
-
-if (apiKey is null)
-{
-    return;
-}
-Console.WriteLine($"API Key: {apiKey}");
-
-var botClient = new TelegramBotClient(apiKey);
+var botClient = new TelegramBotClient("8054511567:AAGo05bzhI1iGfyLbRt8VncK6S5ToSrK96k");
 
 using CancellationTokenSource cts = new();
 
@@ -50,82 +38,35 @@ cts.Cancel();
 
 async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
 {
-    if (update.Message is not { } message)
-        return;
 
-    if (message.Text is not { } messageText)
-        return;
-
-    var chatId = message.Chat.Id;
-
-    Console.WriteLine($"Received a '{messageText}' message in chat {chatId}.");
-
-    // Check if message contains YouTube URL
-    if (messageText.Contains("youtube.com") || messageText.Contains("youtu.be"))
+    if (update.Type == UpdateType.Message)
     {
-        try
+        if (update.Message is not { } message)
+            return;
+
+        if (message.Text is not { } messageText)
+            return;
+
+        var chatId = message.Chat.Id;
+
+        if (message.Text == "/start")
         {
-            await botClient.SendMessage(
-                chatId: chatId,
-                text: "Processing your YouTube video...",
-                cancellationToken: cancellationToken);
-
-            var youtube = new YoutubeClient();
-            var video = await youtube.Videos.GetAsync(messageText);
-
-            // Get available streams
-            var streamManifest = await youtube.Videos.Streams.GetManifestAsync(video.Id);
-
-            var muxedStream = streamManifest.GetMuxedStreams().TryGetWithHighestVideoQuality();
-
-            if (muxedStream != null)
-            {
-                // Handle muxed stream (simpler case)
-                await DownloadAndSendStream(botClient, chatId, youtube, video, muxedStream, cancellationToken);
-            }
-            else
-            {
-                // Handle separate video and audio streams
-                var videoStream = streamManifest.GetVideoOnlyStreams().TryGetWithHighestVideoQuality();
-                var audioStream = streamManifest.GetAudioOnlyStreams()
-                .OrderByDescending(s => s.Bitrate)
-                .FirstOrDefault();
-
-                if (videoStream != null && audioStream != null)
-                {
-                    await DownloadAndCombineSeparateStreams(
-                        botClient,
-                        chatId,
-                        youtube,
-                        video,
-                        videoStream,
-                        audioStream,
-                        cancellationToken);
-                }
-                else
-                {
-                    await botClient.SendMessage(
-                        chatId: chatId,
-                        text: "No suitable video stream found.",
-                        cancellationToken: cancellationToken);
-                }
-            }
+            await SetButtons(botClient, message);
         }
-        catch (Exception ex)
+        else if (messageText.Contains("youtube.com") || messageText.Contains("youtu.be"))
         {
-            await botClient.SendMessage(
-                chatId: chatId,
-                text: $"Error: {ex.Message}",
-                cancellationToken: cancellationToken);
+            await YoutubeDownloader(message, chatId, cancellationToken);
         }
+
     }
-    else
+    else if (update.Type == UpdateType.CallbackQuery)
     {
-        await botClient.SendMessage(
-            chatId: chatId,
-            text: "Please send me a YouTube URL to download the video.",
-            cancellationToken: cancellationToken);
+        if (update.CallbackQuery is not { } callbackQuery)
+            return;
+
+        await HandleCallbackQuery(botClient, callbackQuery, cancellationToken);
     }
+
 }
 
 Task HandlePollingErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken cancellationToken)
@@ -375,3 +316,110 @@ async Task DownloadWithProgress(
         await stream.CopyToAsync(fileStream);
     }
 }
+async Task SetButtons(ITelegramBotClient botClient, Message message)
+{
+
+    var inlineKeyboard = new InlineKeyboardMarkup(new[]
+    {
+            new[]
+            {
+                InlineKeyboardButton.WithCallbackData("Youtube", "youtube_btn"),
+                InlineKeyboardButton.WithCallbackData("Instagram", "instagram_btn")
+            }
+        });
+
+    await botClient.SendMessage(
+        chatId: message.Chat.Id,
+        text: "Please choose an option:",
+        replyMarkup: inlineKeyboard);
+
+    // Handle other message types (text, photo, etc.)
+}
+
+async Task HandleCallbackQuery(ITelegramBotClient botClient, CallbackQuery callbackQuery, CancellationToken cancellationToken)
+{
+    if (callbackQuery.Data == "youtube_btn")
+    {
+        await YoutubeCallback(callbackQuery.Message.Chat.Id, cancellationToken);
+    }
+    else if (callbackQuery.Data == "instagram_btn")
+    {
+        await botClient.SendMessage(
+            chatId: callbackQuery.Message.Chat.Id,
+            text: "You clicked Button 2");
+    }
+
+    // Always answer callback queries to remove the loading state
+    await botClient.AnswerCallbackQuery(
+        callbackQueryId: callbackQuery.Id);
+}
+
+async Task YoutubeCallback(long chatId, CancellationToken cancellationToken)
+{
+    await botClient.SendMessage(
+        chatId: chatId,
+        text: "Please send me a YouTube URL to download the video.",
+        cancellationToken: cancellationToken);
+}
+
+async Task YoutubeDownloader(Message message, long chatId, CancellationToken cancellationToken)
+{
+    try
+    {
+        await botClient.SendMessage(
+            chatId: chatId,
+            text: "Processing your YouTube video...",
+            cancellationToken: cancellationToken);
+
+        var youtube = new YoutubeClient();
+        var video = await youtube.Videos.GetAsync(message.Text);
+
+        // Get available streams
+        var streamManifest = await youtube.Videos.Streams.GetManifestAsync(video.Id);
+
+        var muxedStream = streamManifest.GetMuxedStreams().TryGetWithHighestVideoQuality();
+
+        if (muxedStream != null)
+        {
+            // Handle muxed stream (simpler case)
+            await DownloadAndSendStream(botClient, chatId, youtube, video, muxedStream, cancellationToken);
+        }
+        else
+        {
+            // Handle separate video and audio streams
+            var videoStream = streamManifest.GetVideoOnlyStreams().TryGetWithHighestVideoQuality();
+            var audioStream = streamManifest.GetAudioOnlyStreams()
+            .OrderByDescending(s => s.Bitrate)
+            .FirstOrDefault();
+
+            if (videoStream != null && audioStream != null)
+            {
+                await DownloadAndCombineSeparateStreams(
+                    botClient,
+                    chatId,
+                    youtube,
+                    video,
+                    videoStream,
+                audioStream,
+                    cancellationToken);
+            }
+            else
+            {
+                await botClient.SendMessage(
+                    chatId: chatId,
+                    text: "No suitable video stream found.",
+                    cancellationToken: cancellationToken);
+            }
+        }
+
+        await SetButtons(botClient, message);
+    }
+    catch (Exception ex)
+    {
+        await botClient.SendMessage(
+            chatId: chatId,
+            text: $"Error: {ex.Message}",
+            cancellationToken: cancellationToken);
+    }
+}
+
